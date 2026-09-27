@@ -40,12 +40,25 @@ def package(root: Path, destination: Path, source_sha: str) -> list[str]:
         root / 'offline/tests/engine-results.json',
         root / 'offline/tests/browser-results.json',
         root / 'offline/tests/mobile-results.json',
+        root / 'android/tests/device-results.json',
     ]
     for item in evidence:
         data = json.loads(item.read_text(encoding='utf-8'))
         tests = data.get('tests', [])
         if not tests or any(t.get('status') != 'PASS' for t in tests):
             raise ValueError(f'Test evidence missing or failing: {item}')
+    device = json.loads((root/'android/tests/device-results.json').read_text(encoding='utf-8'))
+    apk_hash = hashlib.sha256(apk.read_bytes()).hexdigest()
+    if device.get('apk_sha256') != apk_hash or device.get('environment', {}).get('api') != 35:
+        raise ValueError('Android runtime evidence does not match this APK / API 35')
+    required_tests = {
+        'coldStartRendersBundledPageWithoutInternetPermission', 'reloadServesTheBundledDocumentAgain',
+        'demoDecodesInsideTheInstalledApk', 'embeddedImagesAndBlobWorkersStillLoad',
+        'realNativeBridgeStagesAndCancelsExport',
+        'resourceAndNavigationPolicyRejectsEverythingExceptTheLocalPage',
+    }
+    if {t.get('name') for t in device['tests']} != required_tests:
+        raise ValueError('Android runtime regression coverage incomplete')
     destination.mkdir(parents=True, exist_ok=True)
     prefix = f'unlock-music-offline-{version}'
     shutil.copy2(apk, destination / f'{prefix}-debug.apk')
@@ -57,7 +70,9 @@ def package(root: Path, destination: Path, source_sha: str) -> list[str]:
         for item in evidence:
             archive.write(item, item.relative_to(root).as_posix())
         for relative in ['android/app/build/reports/lint-results-debug.html',
-                         'android/tests/native-ci.log', 'android/tests/apk-signature-ci.log']:
+                         'android/tests/native-ci.log', 'android/tests/apk-signature-ci.log',
+                         'android/tests/instrumentation-ci.log', 'android/tests/device-output/device.json',
+                         'android/tests/device-output/startup.png', 'android/tests/device-output/decoded-samples.png']:
             item = root / relative
             if not item.is_file():
                 raise FileNotFoundError(f'CI evidence missing: {relative}')
@@ -69,7 +84,9 @@ def package(root: Path, destination: Path, source_sha: str) -> list[str]:
         'run_attempt': os.environ.get('GITHUB_RUN_ATTEMPT'),
         'android_variant': 'debug', 'production_signing': False,
         'android_device_tested': False,
-        'note': 'Debug-signed demo; browser/JVM tests are not Android device tests.',
+        'android_emulator_tested': True,
+        'android_emulator': device['environment'],
+        'note': 'Debug-signed demo; API 35 emulator startup/decoder/bridge tested; physical phones and system providers not validated.',
         'web_sha256': hashlib.sha256(web.read_bytes()).hexdigest(),
         'apk_sha256': hashlib.sha256(apk.read_bytes()).hexdigest(),
     }

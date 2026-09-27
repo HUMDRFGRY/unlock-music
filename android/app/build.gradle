@@ -6,8 +6,9 @@ android {
         applicationId 'io.github.humdrfgry.unlockmusic.offline'
         minSdk 26
         targetSdk 35
-        versionCode 2
-        versionName '0.2.0'
+        versionCode 3
+        versionName '0.2.1'
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
     buildTypes {
         release { minifyEnabled false }
@@ -28,3 +29,10 @@ tasks.register('syncOfflineAssets', Copy) {
     }
 }
 tasks.named('preBuild').configure { dependsOn 'syncOfflineAssets' }
+
+// Test-only dependencies do not become part of the offline APK.
+dependencies {
+    androidTestImplementation 'androidx.test:runner:1.6.2'
+    androidTestImplementation 'androidx.test:core:1.6.1'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+}

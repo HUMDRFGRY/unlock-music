@@ -14,16 +14,11 @@ import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
-import android.webkit.WebResourceRequest;
-import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
-import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.view.WindowInsets;
 import org.json.JSONObject;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
@@ -34,7 +29,6 @@ import java.util.concurrent.Executors;
 
 /** Offline-only shell: one bundled document, system document pickers, bounded exports. */
 public final class MainActivity extends Activity {
-    private static final String ORIGIN = "https://offline.unlock-music.invalid/";
     private static final int OPEN = 100, SAVE = 101;
     private WebView web;
     private ExportStore store;
@@ -80,17 +74,7 @@ public final class MainActivity extends Activity {
         WebView.setWebContentsDebuggingEnabled(false);
         web.setBackgroundColor(Color.rgb(24, 32, 21));
         web.addJavascriptInterface(new Bridge(), "OfflineNative");
-        web.setWebViewClient(new WebViewClient() {
-            @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                // No external links, redirects or new documents can reach the native bridge.
-                String url = request.getUrl().toString();
-                return !(url.equals(ORIGIN) || url.startsWith(ORIGIN + "#"));
-            }
-            @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                return new WebResourceResponse("text/plain", "UTF-8", 403, "Offline only",
-                    java.util.Collections.emptyMap(), new ByteArrayInputStream(new byte[0]));
-            }
-        });
+        web.setWebViewClient(new OfflinePageClient(getAssets(), this::fatal));
         web.setWebChromeClient(new WebChromeClient() {
             @Override public void onPermissionRequest(PermissionRequest request) { request.deny(); }
             @Override public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
@@ -107,13 +91,9 @@ public final class MainActivity extends Activity {
                 return true;
             }
         });
-        try (InputStream input = getAssets().open("index.html")) {
-            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-            byte[] buffer = new byte[16384]; int n;
-            while ((n = input.read(buffer)) != -1) bytes.write(buffer, 0, n);
-            // HTTPS base provides a normal origin; no connection is made by this method.
-            web.loadDataWithBaseURL(ORIGIN, bytes.toString("UTF-8"), "text/html", "UTF-8", ORIGIN);
-        } catch (Exception e) { fatal("内置页面加载失败：" + e.getMessage()); }
+        // Load one exact URL that OfflinePageClient serves from APK assets. No data:
+        // navigation, remote server, INTERNET permission, or file:// access is needed.
+        web.loadUrl(OfflinePageClient.PAGE_URL);
     }
 
     private final class Bridge {

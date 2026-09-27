@@ -67,9 +67,26 @@ jobs:
       - name: Build, lint and verify Android debug APK
         run: |
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
-          gradle -p android --no-daemon assembleDebug lintDebug
+          gradle -p android --no-daemon assembleDebug assembleDebugAndroidTest lintDebug
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose android/app/build/outputs/apk/debug/app-debug.apk | tee android/tests/apk-signature-ci.log
-          python .github/scripts/package-offline.py
+      - name: Enable hardware acceleration for Android emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Installed APK startup and offline WebView regression tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          emulator-boot-timeout: 300
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: bash .github/scripts/run-android-tests.sh
+      - name: Package only after Android runtime tests pass
+        run: python .github/scripts/package-offline.py
       - name: Built binaries and web bundle
         uses: actions/upload-artifact@v4
         with:
@@ -86,6 +103,8 @@ jobs:
             offline/tests/*results.json
             offline/tests/mobile-*.png
             android/tests/*ci.log
+            android/tests/device-results.json
+            android/tests/device-output/
             android/app/build/reports/lint-results-debug.html
           if-no-files-found: warn
           retention-days: 14
