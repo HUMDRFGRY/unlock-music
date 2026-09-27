@@ -54,7 +54,7 @@ public final class OfflineStartupTest {
         PackageInfo info = context.getPackageManager().getPackageInfo(context.getPackageName(), PackageManager.GET_PERMISSIONS);
         assertFalse(Arrays.asList(info.requestedPermissions == null ? new String[0] : info.requestedPermissions)
             .contains(Manifest.permission.INTERNET));
-        assertEquals(JSONObject.quote(OfflinePageClient.PAGE_URL), js("location.href"));
+        assertEquals("true", js("location.href === " + JSONObject.quote(OfflinePageClient.PAGE_URL)));
         assertEquals("true", js("window.isSecureContext"));
         assertEquals("\"UTF-8\"", js("document.characterSet"));
         assertEquals("true", js("document.title.includes('Unlock Music') && !document.body.innerText.includes('ERR_HTTP_RESPONSE_CODE_FAILURE')"));
@@ -72,7 +72,7 @@ public final class OfflineStartupTest {
         js("window.__oldPage = true");
         scenario.onActivity(activity -> web.reload());
         await("Boolean(!window.__oldPage && window.OfflineUI && document.getElementById('demo-btn'))", 30000);
-        assertEquals(JSONObject.quote(OfflinePageClient.PAGE_URL), js("location.href"));
+        assertEquals("true", js("location.href === " + JSONObject.quote(OfflinePageClient.PAGE_URL)));
     }
 
     @Test public void demoDecodesInsideTheInstalledApk() throws Exception {
