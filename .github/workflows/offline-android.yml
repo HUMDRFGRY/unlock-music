@@ -83,7 +83,9 @@ jobs:
           profile: pixel_2
           emulator-boot-timeout: 300
           disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          # Headless CI uses software GLES; the optional Vulkan path is not needed
+          # for these WebView tests. App settings and all six assertions are unchanged.
+          emulator-options: -no-window -gpu swiftshader -feature -Vulkan -no-snapshot -noaudio -no-boot-anim
           script: bash .github/scripts/run-android-tests.sh
       - name: Package only after Android runtime tests pass
         run: python .github/scripts/package-offline.py
