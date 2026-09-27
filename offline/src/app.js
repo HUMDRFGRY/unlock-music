@@ -86,6 +86,7 @@ function render(){
   const details=bytes(j.file.size)+(j.result?' · '+j.result.kind:' · 本地文件');
   const notes=j.error?`<span class="file-note file-error">${esc(j.error)}</span>`:j.result?.warnings.length?`<span class="file-note">${esc(j.result.warnings[0])}</span>`:'';
   let actions='';if(j.status==='done')actions=actionButton('play','试听','play')+actionButton('download','下载文件','download');
+  if(j.status==='error')actions+=actionButton('diagnose','查看诊断','help');
   if(['error','cancelled'].includes(j.status))actions+=actionButton('retry','重新处理','retry');
   if(j.status==='working')actions+=actionButton('cancel','取消当前文件','x');else actions+=actionButton('remove','从队列移除','x','remove');
   return `<tr data-id="${j.id}"><td><div class="file-cell"><div class="file-art ${color}">${icon('music')}</div><div class="file-text"><span class="file-name" title="${esc(j.file.name)}">${esc(j.file.name)}</span><span class="file-detail">${esc(details)}</span>${notes}</div></div></td><td>${j.result?`<span class="output-tag">${j.result.format.toUpperCase()}</span>`:'<span style="color:var(--faint)">—</span>'}</td><td>${statusHtml(j)}</td><td><div class="file-actions">${actions}</div></td></tr>`;
@@ -103,9 +104,9 @@ async function runDecoder(j){
     let worker,workerUrl,timer,settled=false;
     const finish=(err,data)=>{if(settled)return;settled=true;clearTimeout(timer);worker?.terminate();if(workerUrl)URL.revokeObjectURL(workerUrl);j.abort=null;err?reject(err):resolve(data);};
     try{
-     const handler=`\nself.onmessage=async(e)=>{try{const r=await OfflineMusicEngine.decode(e.data.buffer,e.data.name,p=>self.postMessage({kind:'progress',p}));const transfer=[r.bytes.buffer];if(r.cover)transfer.push(r.cover.bytes.buffer);self.postMessage({kind:'done',result:r},transfer);}catch(e){self.postMessage({kind:'error',message:e.message||String(e)});}};`;
+     const handler=`\nself.onmessage=async(e)=>{try{const r=await OfflineMusicEngine.decode(e.data.buffer,e.data.name,p=>self.postMessage({kind:'progress',p}));const transfer=[r.bytes.buffer];if(r.cover)transfer.push(r.cover.bytes.buffer);self.postMessage({kind:'done',result:r},transfer);}catch(e){self.postMessage({kind:'error',message:e.message||String(e),code:e.code||null,diagnostics:e.diagnostics||null});}};`;
      workerUrl=URL.createObjectURL(new Blob([engineText,handler],{type:'text/javascript'}));worker=new Worker(workerUrl);
-     worker.onmessage=e=>{if(j.cancelled){finish(Error('CANCELLED'));return;}if(e.data.kind==='progress')progress(e.data.p);else if(e.data.kind==='done'){showEngine('worker');finish(null,e.data.result);}else finish(Error(e.data.message));};
+     worker.onmessage=e=>{if(j.cancelled){finish(Error('CANCELLED'));return;}if(e.data.kind==='progress')progress(e.data.p);else if(e.data.kind==='done'){showEngine('worker');finish(null,e.data.result);}else{const error=Error(e.data.message);error.code=e.data.code;error.diagnostics=e.data.diagnostics;finish(error);}};
      worker.onerror=e=>{e.preventDefault();const err=Error('WORKER_UNAVAILABLE');err.workerFailure=true;finish(err);};
      timer=setTimeout(()=>finish(Error('处理超时：请检查文件是否损坏，或尝试较小文件。')),120000);
      j.abort=()=>finish(Error('CANCELLED'));
@@ -122,14 +123,14 @@ async function runDecoder(j){
 async function pump(){
  if(running||paused)return;
  const j=jobs.find(j=>j.status==='queued');if(!j)return;
- running=true;activeJob=j;j.status='working';j.progress=0;j.cancelled=false;j.error='';render();
+ running=true;activeJob=j;j.status='working';j.progress=0;j.cancelled=false;j.error='';j.diagnostics=null;render();
  try{
   const result=await runDecoder(j);
   if(j.cancelled||!jobs.includes(j))return;
   j.result=result;j.blob=new Blob([result.bytes],{type:result.mime});j.url=URL.createObjectURL(j.blob);delete result.bytes;
   if(result.cover){j.coverUrl=URL.createObjectURL(new Blob([result.cover.bytes],{type:result.cover.mime}));delete result.cover.bytes;}
   j.status='done';j.progress=100;
- }catch(e){if(j.cancelled||e.message==='CANCELLED')j.status='cancelled';else{j.status='error';j.error=e.message||'处理失败';}}
+ }catch(e){if(j.cancelled||e.message==='CANCELLED')j.status='cancelled';else{j.status='error';j.error=e.message||'处理失败';j.diagnostics=e.diagnostics||{schemaVersion:1,stage:'file-read-or-worker',code:e.code||'FILE_READ_OR_WORKER_FAILED',inputBytes:j.file.size};}}
  finally{running=false;activeJob=null;j.abort=null;render();if(!paused)queueMicrotask(pump);}
 }
 function addFiles(files){
@@ -197,8 +198,21 @@ async function downloadAll(){
 }
 function report(){
  const names=outputNames();
- const data={app:'Unlock Music Offline Demo',version:'0.2.0',generatedAt:new Date().toISOString(),localOnly:true,sourceCommit:'dc518c5522bba43bd6248b58b56ecd1bb6058895',files:jobs.map(j=>({input:j.file.name,inputBytes:j.file.size,status:j.status,output:names.get(j.id)||null,outputBytes:j.blob?.size||0,metadata:j.result?.metadata||null,warnings:j.result?.warnings||[],error:j.error||null}))};
+ const data={app:'Unlock Music Offline Demo',version:'0.2.0',generatedAt:new Date().toISOString(),localOnly:true,sourceCommit:'dc518c5522bba43bd6248b58b56ecd1bb6058895',files:jobs.map(j=>({input:j.file.name,inputBytes:j.file.size,status:j.status,output:names.get(j.id)||null,outputBytes:j.blob?.size||0,metadata:j.result?.metadata||null,warnings:j.result?.warnings||[],error:j.error||null,diagnostics:j.diagnostics||j.result?.diagnostics||null}))};
  saveBlob(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),'unlock-music-report.json');
+}
+function showDiagnosis(j){
+ const data={app:'Unlock Music Offline Demo',schemaVersion:1,localOnly:true,
+  appVersion:'unknown',
+  diagnostics:j.diagnostics||null};
+ // Read the build stamp without collecting filenames, tags, audio/key bytes or paths.
+ data.appVersion=document.querySelector('.about-link span')?.textContent.match(/(\d+\.\d+\.\d+)/)?.[1]||'unknown';
+ $('dialog-title').textContent='文件诊断';const body=$('dialog-body');body.replaceChildren();
+ const note=document.createElement('p');note.textContent='诊断不包含文件名、歌曲信息、音频内容或密钥。它记录格式、字节数和失败阶段，不会上传。原文件未改动。';
+ const pre=document.createElement('pre');pre.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px';pre.textContent=JSON.stringify(data,null,2);
+ const save=document.createElement('button');save.className='button primary';save.textContent='保存诊断 JSON';
+ save.addEventListener('click',()=>saveBlob(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),'unlock-music-diagnostic.json'));
+ body.append(note,pre,save);$('info-dialog').showModal();
 }
 function resetPlayer(){audio.pause();audio.removeAttribute('src');audio.load();playingId=null;$('player-title').textContent='等待一首音乐';$('player-artist').textContent='处理完成后，点击文件旁的播放按钮。';$('player-format').textContent='LOCAL';$('player-art').innerHTML=icon('music');$('seek').value=0;$('duration').textContent='0:00';$('current-time').textContent='0:00';refreshPlayerControls();}
 function refreshPlayerControls(){const ready=jobs.filter(j=>j.status==='done'),has=playingId!==null;$('play-btn').disabled=!has;$('seek').disabled=!has;$('previous-btn').disabled=ready.length<2||!has;$('next-btn').disabled=ready.length<2||!has;$('play-btn').innerHTML=icon(audio.paused?'play':'pause');$('play-btn').setAttribute('aria-label',audio.paused?'播放':'暂停');}
@@ -244,6 +258,7 @@ $('clear-btn').addEventListener('click',()=>{jobs.forEach(release);jobs=[];filte
 $('zip-btn').addEventListener('click',downloadAll);$('report-btn').addEventListener('click',report);$('naming').addEventListener('change',()=>toast('命名方式已更新；会应用于后续下载。'));
 $('queue-body').addEventListener('click',e=>{
  const button=e.target.closest('[data-action]');if(!button)return;const row=button.closest('[data-id]'),j=jobs.find(j=>j.id===Number(row.dataset.id));if(!j)return;
+ if(button.dataset.action==='diagnose')showDiagnosis(j);
  if(button.dataset.action==='play')playJob(j);
  if(button.dataset.action==='download')saveBlob(j.blob,outputNames().get(j.id));
  if(button.dataset.action==='cancel'){cancelJob(j);render();}

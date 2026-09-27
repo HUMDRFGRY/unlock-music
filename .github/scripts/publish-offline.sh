@@ -38,7 +38,10 @@ PY
 cat > "$TMP/notes.md" <<EOF
 ## Unlock Music 离线 Demo $VERSION
 
-- Android 0.2.1 修复内置页面被误拦截导致的 \`ERR_HTTP_RESPONSE_CODE_FAILURE\`，不再使用 data: 页面导航。
+- 修正带前置 ID3 标签的 AAC/FLAC 等音频识别，以及已是普通音频却仍用旧加密后缀时的重复解码。
+- 失败条目新增“查看诊断”问号按钮，可保存不含文件名、歌曲内容或密钥的诊断 JSON。完整会话报告仍含文件名，请勿混淆。
+- 本次未新增新版 QMC、MFLAC、MGG、KGM、VPR 算法；通用报错不代表文件一定损坏，具体失败仍需诊断或样本确认。
+- 保留 0.2.1 的 Android 本地页面启动修复，不使用 data: 页面导航。
 - Android：下载 \`unlock-music-offline-$VERSION-debug.apk\`。
 - 网页：下载单文件 HTML，或解压 \`unlock-music-offline-$VERSION-web.zip\` 后打开 index.html。
 - \`SHA256SUMS.txt\` 校验全部附件；\`TEST-EVIDENCE.zip\` 为本次构建测试证据。
