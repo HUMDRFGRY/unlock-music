@@ -38,11 +38,12 @@ PY
 cat > "$TMP/notes.md" <<EOF
 ## Unlock Music 离线 Demo $VERSION
 
+- Android 0.2.1 修复内置页面被误拦截导致的 \`ERR_HTTP_RESPONSE_CODE_FAILURE\`，不再使用 data: 页面导航。
 - Android：下载 \`unlock-music-offline-$VERSION-debug.apk\`。
 - 网页：下载单文件 HTML，或解压 \`unlock-music-offline-$VERSION-web.zip\` 后打开 index.html。
 - \`SHA256SUMS.txt\` 校验全部附件；\`TEST-EVIDENCE.zip\` 为本次构建测试证据。
 
-这是 **debug 签名的预览版**，不是 Google Play 正式签名版本。不同构建的 debug 签名可能不同；升级前请导出数据。网页/JVM 测试与 APK 编译不等于 Android 真机验证。
+这是 **debug 签名的预览版**，不是 Google Play 正式签名版本。不同构建的 debug 签名可能不同；升级前请导出数据。本构建通过 Android API 35 模拟器启动、页面渲染、解码及桥接回归；模拟器不等于你的实体手机，系统文件选择/保存提供器仍需真机验收。
 
 仅处理你拥有或有权转换的文件。格式范围以离线包 README 为准。
 

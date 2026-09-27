@@ -1,46 +1,36 @@
 # Android 离线版
 
-原生 Activity + 系统 WebView，内置构建产生的 `../offline/index.html`，不是远端网站套壳，不维护第二套解码算法。
+下载成品请进入仓库 [Releases](https://github.com/HUMDRFGRY/unlock-music/releases)，选择 `offline-v0.2.1` 的 `unlock-music-offline-0.2.1-debug.apk`。源码本身不是 APK。预览版未采用稳定正式签名；覆盖安装若提示签名冲突，请先保存已有导出文件，再卸载旧预览版后安装。
 
-## 成品与验证范围
+## 0.2.1 启动修复
 
-在 [Releases](https://github.com/HUMDRFGRY/unlock-music/releases) 下载 `unlock-music-offline-<版本>-debug.apk`。选择以 `offline-v` 开头的离线版预发行标签。只有 Actions 编译、lint、签名校验和附件回下载核验成功后才公开 Release。
+0.2.0 的 `shouldInterceptRequest` 无条件返回 403，与 `loadDataWithBaseURL` 内部使用的 data: 请求冲突，可能显示 `data:text/html;charset=utf-8;base64,` / `net::ERR_HTTP_RESPONSE_CODE_FAILURE`。这属于程序启动问题，不是音乐文件、网络或用户权限问题。
 
-这是 **调试签名 Demo**，没有配置生产签名证书，也没有上架应用商店。不同 runner 的签名可能变化，升级可能需要卸载重装；先保存所需文件。安装时按系统提示对当前来源授权，不要关闭系统安全防护。
+0.2.1 改用一个固定 HTTPS 形式的本地地址，由 `OfflinePageClient` 在拦截回调内直接提供 APK 中 `index.html` 的 200 响应；不建立网络连接，不需要服务器。仅允许精确页面路径和页内锚点，其他路径、主机、查询参数、任意 data: 主文档仍被拒绝。内嵌 data 图片/音频交回 WebView 处理，blob 音频/Worker 继续由 WebView 处理。没有开启 INTERNET、file:// 跨域、明文流量或混合内容权限。
 
-最低 Android 8.0（API26）是工程配置，不是经过真机验证的兼容承诺。测试证据记录于每次发布附件；浏览器桥接模拟和 JVM 测试不能证明真实系统文件提供器兼容。
+## 构建与运行测试
 
-## 本地构建
-
-需要 Python 3、Node.js、ffmpeg、JDK17、Gradle8.11.1、Android SDK Platform35 / Build Tools35.0.0。AGP 固定8.9.2，首次获取 SDK 和依赖需要联网。
+在已配备 Python 3、Node.js、ffmpeg、JDK 17、Android SDK 35、Gradle 8.11.1 的开发环境，从仓库根目录运行：
 
 ```sh
 python offline/tests/make_audio.py
 node offline/tests/engine.test.cjs
 python offline/build.py
-# 设置 ANDROID_HOME，或 android/local.properties 中填写 sdk.dir。
-gradle -p android --no-daemon assembleDebug lintDebug
+gradle -p android assembleDebug assembleDebugAndroidTest lintDebug
 ```
 
-产物为 `android/app/build/outputs/apk/debug/app-debug.apk`。preBuild 自动复制唯一的生成 HTML 到 assets。未附 Gradle Wrapper JAR，可使用已安装 Gradle，或运行 `gradle -p android wrapper --gradle-version 8.11.1`。
+APK 在 `android/app/build/outputs/apk/debug/app-debug.apk`。测试依赖仅进入独立的 instrumentation 测试 APK，不进入发布 APK。运行 Android API 35 模拟器后执行：
 
-## 导入、保存与离线约束
+```sh
+bash .github/scripts/run-android-tests.sh
+```
 
-使用系统 ACTION_OPEN_DOCUMENT 多选本地文件，ACTION_CREATE_DOCUMENT 另存为；Manifest 不申请 INTERNET、存储、媒体扫描或整盘访问权限。云盘文件提供器可能自行联网，建议选择本机文件。
+CI 在 GitHub Actions 的硬件加速模拟器中安装这两个 APK，执行 AndroidJUnitRunner。覆盖冷启动、重新加载、真实 WebView 中自产演示样本解码、data 图片、Blob Worker、真实 JavaScript→Java 分块暂存和取消，以及页面/导航白名单。测试时关闭模拟器 Wi-Fi 与移动数据，目标 APK 不声明网络权限。
 
-loadDataWithBaseURL 的固定 HTTPS origin 仅用于已内置页面，不发起网络连接。WebView 禁止网络加载、外部导航、file URL 跨域、混合内容和第三方权限请求，CSP 禁止 connect 和 iframe，JavaScript bridge 只提供给内置页面。
+打包要求全部六项测试通过、运行记录与当前 APK SHA-256 一致，并附启动截图、解码截图、系统及 WebView 版本；缺项/失败/跳过阻止发布。结果以该版本关联 Actions 和 `TEST-EVIDENCE.zip` 为准，不把源码中的测试声明当成通过记录。
 
-导出逐块48KiB，单次最多300MiB；只允许一个保存会话，核验总字节数，临时文件位于应用私有缓存，路径由程序生成。取消/成功/下次启动清理临时导出。写入失败尝试删除新建的不完整目标文件；文件提供器拒绝删除时可能需要手工清理残留。
+## 仍需实体手机验收的部分
 
-网页输入上限128MiB/文件、256MiB/队列、100文件；非流式处理，建议小批量。退出或系统回收进程不恢复队列，切后台暂停试听，不提供后台播放服务。
+模拟器回归不代表已验证所有厂商系统。系统文件多选、云端/本地文档提供器、另存为、取消/磁盘满、手势导航和不同系统 WebView 版本仍需真机测试。Android 8.0 是 minSdk 配置下限，不是对旧 WebView 的兼容承诺。
 
-## 待真机检查
-
-冷启动、飞行模式、NCM 多文件导入、中文长文件名、试听、单曲和 ZIP 保存/CRC、取消重试、磁盘满/权限拒绝、旋转、刘海和手势导航区域，以及多个 Android/WebView 版本。
-
-设计依据：
-- https://developer.android.com/develop/ui/views/layout/webapps/load-local-content
-- https://developer.android.com/training/data-storage/shared/documents-files
-- https://developer.android.com/build/releases/agp-8-9-0-release-notes
-
-代码遵循仓库 MIT License，仅处理有权转换的文件。
+文件通过系统文档选择器导入和保存，不申请整盘存储权限。导出最多 300 MiB、每块 48 KiB，只允许一个保存会话，校验输出长度；缓存位于应用私有目录，保存/取消或下次启动时清理。原音乐文件不被覆盖。

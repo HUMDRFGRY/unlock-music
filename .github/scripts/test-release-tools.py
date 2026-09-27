@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local packaging and mocked-gh tests; these do not build Android or access GitHub."""
 from __future__ import annotations
+import hashlib
 import importlib.util
 import json
 import os
@@ -15,6 +16,9 @@ HERE = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location('packager', HERE/'package-offline.py')
 PKG = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PKG)
+DSPEC=importlib.util.spec_from_file_location('device_tests', HERE/'record-android-tests.py')
+DEVICE=importlib.util.module_from_spec(DSPEC)
+DSPEC.loader.exec_module(DEVICE)
 SHA = 'a' * 40
 VERSION = '0.2.0'
 # Fake GitHub CLI for isolated state-machine tests. Never communicates with GitHub.
@@ -57,7 +61,7 @@ class ReleaseTools(unittest.TestCase):
         self.root = Path(self.tmp.name)/'repo'
         self.root.mkdir()
         for d in ['offline/tests','android/app/build/outputs/apk/debug',
-                  'android/app/build/reports','android/tests']:
+                  'android/app/build/reports','android/tests/device-output']:
             (self.root/d).mkdir(parents=True, exist_ok=True)
         (self.root/'offline/VERSION').write_text(VERSION)
         (self.root/'android/app/build.gradle').write_text("versionName '0.2.0'")
@@ -69,8 +73,14 @@ class ReleaseTools(unittest.TestCase):
         for name in ['engine-results.json','browser-results.json','mobile-results.json']:
             (self.root/'offline/tests'/name).write_text(json.dumps({'tests':[{'status':'PASS'}]}))
         for name in ['android/app/build/reports/lint-results-debug.html',
-                     'android/tests/native-ci.log','android/tests/apk-signature-ci.log']:
+                     'android/tests/native-ci.log','android/tests/apk-signature-ci.log',
+                     'android/tests/instrumentation-ci.log','android/tests/device-output/device.json',
+                     'android/tests/device-output/startup.png','android/tests/device-output/decoded-samples.png']:
             (self.root/name).write_text('simulated CI fixture only')
+        (self.root/'android/tests/device-results.json').write_text(json.dumps({
+            'tests':[{'name':n,'status':'PASS'} for n in DEVICE.EXPECTED],
+            'environment':{'api':35, 'webview':'mock fixture, not emulator execution'},
+            'apk_sha256':hashlib.sha256(self.apk.read_bytes()).hexdigest()}))
         self.out=self.root/'artifacts'
         self.state=Path(self.tmp.name)/'mock'; self.state.mkdir()
         self.bin=Path(self.tmp.name)/'bin'; self.bin.mkdir()
@@ -95,11 +105,31 @@ class ReleaseTools(unittest.TestCase):
         info=json.loads((self.out/'BUILD-INFO.json').read_text())
         self.assertEqual(info['source_commit'],SHA)
         self.assertFalse(info['android_device_tested'])
+        self.assertTrue(info['android_emulator_tested'])
         result=subprocess.run(['sha256sum','-c','SHA256SUMS.txt'],cwd=self.out,capture_output=True)
         self.assertEqual(result.returncode,0,result.stderr)
         with zipfile.ZipFile(self.out/f'unlock-music-offline-{VERSION}-web.zip') as z:
             self.assertEqual(len(z.namelist()),4)
             self.assertEqual(z.read(f'unlock-music-offline-{VERSION}/index.html'),self.page)
+    def test_missing_android_runtime_evidence_blocks_packaging(self):
+        (self.root/'android/tests/device-results.json').unlink()
+        with self.assertRaises(FileNotFoundError): self.build_assets()
+    def test_wrong_android_apk_evidence_blocks_packaging(self):
+        p=self.root/'android/tests/device-results.json'
+        data=json.loads(p.read_text()); data['apk_sha256']='0'*64; p.write_text(json.dumps(data))
+        with self.assertRaises(ValueError): self.build_assets()
+    def test_incomplete_android_runtime_tests_block_packaging(self):
+        p=self.root/'android/tests/device-results.json'
+        data=json.loads(p.read_text()); data['tests'].pop(); p.write_text(json.dumps(data))
+        with self.assertRaises(ValueError): self.build_assets()
+    def test_instrumentation_parser_requires_all_real_statuses(self):
+        log=''.join('INSTRUMENTATION_STATUS: class=io.github.humdrfgry.unlockmusic.OfflineStartupTest\n'
+            'INSTRUMENTATION_STATUS: test='+name+'\nINSTRUMENTATION_STATUS_CODE: 0\n' for name in DEVICE.EXPECTED)
+        good=log+'INSTRUMENTATION_CODE: -1\n'
+        self.assertEqual(len(DEVICE.parse_log(good)),6)
+        for bad in [log, good.replace('STATUS_CODE: 0','STATUS_CODE: -2',1),
+                    good.replace('STATUS_CODE: 0','STATUS_CODE: -3',1), 'INSTRUMENTATION_CODE: -1\n']:
+            with self.assertRaises(ValueError): DEVICE.parse_log(bad)
     def test_missing_apk_is_never_fabricated(self):
         self.apk.unlink()
         with self.assertRaises(FileNotFoundError): self.build_assets()
@@ -121,7 +151,10 @@ class ReleaseTools(unittest.TestCase):
     def test_release_round_trip_and_idempotence(self):
         self.build_assets(); result=self.publish()
         self.assertEqual(result.returncode,0,result.stderr)
-        self.assertFalse(json.loads((self.state/'release.json').read_text())['isDraft'])
+        release=json.loads((self.state/'release.json').read_text())
+        self.assertFalse(release['isDraft'])
+        self.assertIn('`ERR_HTTP_RESPONSE_CODE_FAILURE`',release['body'])
+        self.assertNotIn('command not found',result.stderr)
         count=(self.state/'calls').read_text().count('"upload"')
         result=self.publish(); self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual((self.state/'calls').read_text().count('"upload"'),count)
