@@ -59,6 +59,65 @@ async function test(name,fn){await fn();results.push({name,status:'PASS'});conso
  await test('Random ciphertext is not mistaken for MP3 (64 samples)',async()=>{for(let i=0;i<64;i++){const b=crypto.randomBytes(65536);b[0]=0;b[1]=0;assert.notEqual(E.sniff(b),'mp3');await assert.rejects(()=>E.decode(b,'random.qmc3'));}});
  await test('Single-file size limit rejects before parsing',async()=>await assert.rejects(()=>E.decode(new Uint8Array(E.MAX_FILE+1),'large.wav'),/128 MiB/));
  await test('Progress finishes at 100',async()=>{let last=0;await E.decode(ncm,'p.ncm',p=>{assert.ok(p>=last);last=p;});assert.equal(last,100);});
+
+ const readAudio=ext=>fs.readFileSync(path.join(root,'samples/original.'+ext));
+ const id3=(size=8192,version=3,footer=false)=>{
+  const h=Buffer.from([73,68,51,version,0,footer?16:0,0,0,0,0]);
+  for(let i=9,n=size;i>=6;i--,n>>>=7)h[i]=n&127;
+  const f=Buffer.from(h);f.write('3DI');
+  return Buffer.concat([h,Buffer.alloc(size),...(footer?[f]:[])]);
+ };
+ const tagged=ext=>Buffer.concat([id3(),readAudio(ext)]);
+ await test('ID3-prefixed AAC and FLAC recognized with exact output bytes',async()=>{
+  for(const ext of ['aac','flac']){const b=tagged(ext),r=await E.decode(b,'tagged.'+ext);assert.equal(r.format,ext);assert.deepEqual(Buffer.from(r.bytes),b);assert.equal(r.diagnostics.probe.tagBytes,8202);}
+ });
+ await test('Stacked large ID3 tags on MP3 do not hide its frame chain',async()=>{
+  const b=Buffer.concat([id3(8192),id3(12288),mp3]);const r=await E.decode(b,'stacked.mp3');assert.equal(r.format,'mp3');assert.deepEqual(Buffer.from(r.bytes),b);
+ });
+ await test('ID3v2.4 footer respected; embedded false audio header is not scanned',async()=>{
+  const fake=Buffer.concat([id3(8192,4,true),readAudio('aac')]);fake.write('fLaC',24);const r=await E.decode(fake,'footer.aac');assert.equal(r.format,'aac');assert.deepEqual(Buffer.from(r.bytes),fake);
+ });
+ await test('NCM tagged FLAC/AAC payloads are decoded and preserved',async()=>{
+  for(const ext of ['aac','flac']){const b=tagged(ext),r=await E.decode(packNcm(b,{format:ext}),'tags.ncm');assert.equal(r.format,ext);assert.deepEqual(Buffer.from(r.bytes),b);assert.equal(r.diagnostics.decoder,'ncm');}
+ });
+ await test('Legacy QMC and KWM tagged FLAC payloads preserve bytes',async()=>{
+  const b=tagged('flac');for(const [name,cipher] of [['tags.qmcflac',qmcReference(b)],['tags.kwm',packKwm(b)]]){assert.deepEqual(Buffer.from((await E.decode(cipher,name)).bytes),b);}
+ });
+ await test('Already-decoded audio with supported encrypted suffix is not decrypted twice',async()=>{
+  for(const ext of ['ncm','qmc3','qmcflac','kwm','xm','tm0']){const r=await E.decode(mp3,'already.'+ext);assert.deepEqual(Buffer.from(r.bytes),mp3);assert.equal(r.diagnostics.decoder,'plaintext');assert.match(r.warnings[0],/不再/);}
+ });
+ await test('Plaintext fallback requires audio at a structured boundary, not a late sync',async()=>{
+  const b=Buffer.concat([Buffer.alloc(24),mp3.subarray(92)]);await assert.rejects(()=>E.decode(b,'random.qmc3'));assert.notEqual(E.sniff(Buffer.alloc(4096,255)),'aac');
+ });
+ await test('Truncated, invalid and forged ID3 tags reject with structured diagnostics',async()=>{
+  const truncated=id3(8192).subarray(0,100),invalid=id3(10);invalid[6]=128;
+  const footer=Buffer.concat([id3(30,4,true),mp3]);footer[40]=0;
+  for(const [b,code] of [[truncated,'TRUNCATED_ID3_TAG'],[invalid,'INVALID_ID3_TAG'],[footer,'INVALID_ID3_FOOTER']]){
+   await assert.rejects(()=>E.decode(b,'private.mp3'),e=>e.code===code&&e.diagnostics.stage==='audio-header');
+  }
+ });
+ await test('Malformed FLAC after valid ID3 is rejected rather than bypassing validation',async()=>{
+  const b=Buffer.concat([id3(),readAudio('flac').subarray(0,50)]);await assert.rejects(()=>E.decode(b,'bad.flac'),e=>e.code==='AUDIO_VALIDATION_FAILED');
+ });
+ await test('Single incidental ADTS sync with garbage payload is not called audio',async()=>{
+  const b=Buffer.alloc(4096);readAudio('aac').copy(b,0,0,7);assert.equal(E.sniff(b),'');await assert.rejects(()=>E.decode(b,'fake.aac'));
+ });
+ await test('Failure diagnostics identify decoder and stage without disclosing filename or bytes',async()=>{
+  for(const [ext,route] of [['qmcflac','qmc-legacy'],['mp3','raw']]){
+   await assert.rejects(()=>E.decode(Buffer.alloc(1234),'PRIVATE_SONG.'+ext),e=>{
+    assert.equal(e.code,'AUDIO_HEADER_UNRECOGNIZED');assert.equal(e.diagnostics.decoder,route);assert.equal(e.diagnostics.inputBytes,1234);
+    const d=JSON.stringify(e.diagnostics);assert.ok(!d.includes('PRIVATE_SONG'));assert.ok(!/base64|hex|key|buffer/i.test(d));return true;
+   });
+  }
+ });
+ await test('Unsupported formats remain explicit; diagnostic never claims new-version support',async()=>{
+  await assert.rejects(()=>E.decode(mp3,'test.mflac'),e=>e.code==='UNSUPPORTED_FORMAT'&&e.diagnostics.decoder==='none');
+ });
+ await test('Subarray inputs and repeated attempts leave input buffers unchanged',async()=>{
+  const b=tagged('aac'),parent=Buffer.concat([Buffer.alloc(7),b,Buffer.alloc(9)]),before=Buffer.from(parent);
+  const r=await E.decode(parent.subarray(7,-9),'sub.aac');assert.deepEqual(Buffer.from(r.bytes),b);assert.deepEqual(parent,before);
+  const cipher=qmcReference(b),copy=Buffer.from(cipher);await E.decode(cipher,'sub.qmc3');await E.decode(cipher,'sub.qmc3');assert.deepEqual(cipher,copy);
+ });
  const report={engineTests:results.length,assertionCases:'Includes 32 AES randomized cross-checks and multiple formats / boundary cases.',sourceCommit:'dc518c5522bba43bd6248b58b56ecd1bb6058895',limitations:'Synthetic, independently encoded fixtures only; not a corpus of real platform downloads. Header validation is not a complete codec integrity check.',tests:results};
  fs.writeFileSync(path.join(root,'tests/engine-results.json'),JSON.stringify(report,null,2));
  console.log(`\n${results.length} test groups passed.`);

@@ -101,6 +101,46 @@ with sync_playwright() as p:
     fallback=ctx.new_page();fallback.add_init_script('window.Worker=undefined;');fallback.evaluate('window.Worker=undefined');fallback.set_content((root/'index.html').read_text(encoding='utf-8'));fallback.click('#demo-btn');expect(fallback.locator("#stat-done")).to_have_text("03",timeout=30000)
     assert '兼容模式' in fallback.locator('#engine-mode').inner_text()
     passed('No-Worker fallback successfully decodes all samples offline')
+
+    # Header failures must survive the real Blob Worker and the no-Worker fallback.
+    for diagnostic_page in [page,fallback]:
+        diagnostic_page.click('#clear-btn')
+        diagnostic_page.set_input_files('#file-input',{'name':'PRIVATE_SONG.qmcflac','mimeType':'application/octet-stream','buffer':bytes(1234)})
+        expect(diagnostic_page.locator('#stat-error')).to_have_text('01',timeout=30000)
+        diagnostic_page.locator('[data-action=diagnose]').click()
+        payload=json.loads(diagnostic_page.locator('#dialog-body pre').inner_text())
+        assert payload['appVersion']==(root/'VERSION').read_text().strip(),payload
+        assert payload['diagnostics']['decoder']=='qmc-legacy'
+        assert payload['diagnostics']['code']=='AUDIO_HEADER_UNRECOGNIZED'
+        assert 'PRIVATE_SONG' not in json.dumps(payload)
+        with diagnostic_page.expect_download() as d:diagnostic_page.get_by_role('button',name='保存诊断 JSON').click()
+        target=out/'diagnostic-download.json';d.value.save_as(str(target));assert json.loads(target.read_text())==payload
+        diagnostic_page.click('#dialog-ok')
+        with diagnostic_page.expect_download() as d:diagnostic_page.click('#report-btn')
+        target=out/'error-report.json';d.value.save_as(str(target))
+        assert json.loads(target.read_text())['files'][0]['diagnostics']==payload['diagnostics']
+        diagnostic_page.locator('[data-action=retry]').click()
+        expect(diagnostic_page.locator('#stat-error')).to_have_text('01',timeout=30000)
+    passed('Structured failure diagnostics survive Worker and fallback, retry, dialog and JSON export')
+    page.click('#clear-btn')
+    original=(root/'samples/original.mp3').read_bytes()
+    page.set_input_files('#file-input',{'name':'already.qmc3','mimeType':'application/octet-stream','buffer':original})
+    expect(page.locator('#stat-done')).to_have_text('01',timeout=30000)
+    assert '不再' in page.locator('#queue-body').inner_text()
+    with page.expect_download() as d:page.locator('[data-action=download]').click()
+    target=out/'plaintext.mp3';d.value.save_as(str(target));assert target.read_bytes()==original
+    passed('Already-decoded encrypted-suffix file exports exact bytes through the UI')
+    mobile.click('#clear-btn')
+    mobile.set_input_files('#file-input',{'name':'诊断测试.qmcflac','mimeType':'application/octet-stream','buffer':bytes(1234)})
+    expect(mobile.locator('#stat-error')).to_have_text('01',timeout=30000)
+    for width in [320,360,390]:
+        mobile.set_viewport_size({'width':width,'height':844})
+        assert mobile.evaluate('document.documentElement.scrollWidth<=innerWidth')
+        box=mobile.locator('[data-action=diagnose]').bounding_box();assert box['width']>=44 and box['height']>=44
+    mobile.locator('[data-action=diagnose]').click()
+    assert mobile.evaluate('document.documentElement.scrollWidth<=innerWidth')
+    mobile.screenshot(path=str(out/'mobile-diagnostic.png'),full_page=True)
+    passed('Phone diagnostic action meets 44px target and long error/JSON do not overflow')
     external=[x for x in requests if x.startswith(('http:','https:','ws:','wss:'))]
     assert not external,external
     assert not errors,errors

@@ -149,25 +149,54 @@
     return layer===3?(Math.floor(12*br/hz)+pad)*4:Math.floor((layer===1&&v!==3?72:144)*br/hz)+pad;
   }
   const synchsafe=b=>{if(b.length!==4||b.some(x=>x&128))fail('ID3 长度字段无效');return (b[0]<<21)|(b[1]<<14)|(b[2]<<7)|b[3];};
-  function sniff(b){
-    if(starts(b,'fLaC') && b.length>=42)return 'flac';
-    if(starts(b,'RIFF')&&starts(b,'WAVE',8)&&b.length>=44)return 'wav';
-    if(starts(b,'OggS')&&b.length>=28)return 'ogg';
-    if(starts(b,'ftyp',4)&&b.length>=16)return 'm4a';
-    if(b.length>=7&&b[0]===255&&(b[1]&0xf6)===0xf0&&((b[2]>>2)&15)<13)return 'aac';
-    let start=0;if(starts(b,'ID3')){if(b.length<10)return '';try{start=10+synchsafe(b.slice(6,10));}catch{return '';}}
-    // One incidental MPEG sync word inside random ciphertext is not evidence of audio.
-    // Require three consecutive, bounded frames, or a complete short stream at EOF.
-    for(let o=start;o<Math.min(b.length-3,start+4096);o++){
-      const n1=mp3FrameLength(b,o);if(!n1||o+n1>b.length)continue;
-      const p2=o+n1;if(o===start&&p2===b.length)return 'mp3';
-      const n2=mp3FrameLength(b,p2);if(!n2||p2+n2>b.length)continue;
-      const p3=p2+n2;if(o===start&&p3===b.length)return 'mp3';
-      const n3=mp3FrameLength(b,p3);if(n3&&p3+n3<=b.length)return 'mp3';
+  // Skip only well-formed, bounded ID3v2 tags, never arbitrary bytes or guessed offsets.
+  // Tags may precede AAC/FLAC as well as MP3. Keep the original bytes on export.
+  function probeAudio(b){
+    let offset=0,tagCount=0;
+    const result=(format='',frameOffset=offset,issue='')=>({format,tagBytes:offset,tagCount,frameOffset,issue});
+    while(starts(b,'ID3',offset)){
+      if(++tagCount>16)return result('',offset,'TOO_MANY_ID3_TAGS');
+      if(offset+10>b.length)return result('',offset,'TRUNCATED_ID3_TAG');
+      const version=b[offset+3],flags=b[offset+5];
+      if(![2,3,4].includes(version)||b[offset+4]===255||
+          (flags & (version===2?0x3f:version===3?0x1f:0x0f)))return result('',offset,'INVALID_ID3_TAG');
+      let size;try{size=synchsafe(b.subarray(offset+6,offset+10));}catch{return result('',offset,'INVALID_ID3_TAG');}
+      const footer=version===4&&(flags&0x10)?10:0,end=offset+10+size+footer;
+      if(end>b.length)return result('',offset,'TRUNCATED_ID3_TAG');
+      if(footer&&(!starts(b,'3DI',end-10)||b.subarray(end-7,end).some((v,i)=>v!==b[offset+3+i])))
+        return result('',offset,'INVALID_ID3_FOOTER');
+      offset=end;
     }
-    return '';
+    const p=b.subarray(offset);
+    if(starts(p,'fLaC')&&p.length>=42)return result('flac');
+    if(starts(p,'RIFF')&&starts(p,'WAVE',8)&&p.length>=44)return result('wav');
+    if(starts(p,'OggS')&&p.length>=28)return result('ogg');
+    if(starts(p,'ftyp',4)&&p.length>=16)return result('m4a');
+    // ADTS, like MPEG audio, needs a chain of bounded frames, not one lucky sync word.
+    let cursor=offset,adtsFrames=0,config=-1;
+    while(adtsFrames<3&&cursor+7<=b.length){
+      if(b[cursor]!==255||(b[cursor+1]&0xf6)!==0xf0||((b[cursor+2]>>2)&15)>=13)break;
+      const frameSize=((b[cursor+3]&3)<<11)|(b[cursor+4]<<3)|(b[cursor+5]>>5);
+      const headerSize=(b[cursor+1]&1)?7:9;
+      const currentConfig=((b[cursor+1]&8)<<16)|(b[cursor+2]<<8)|(b[cursor+3]&0xc0);
+      if(frameSize<=headerSize||cursor+frameSize>b.length||(config!==-1&&currentConfig!==config))break;
+      config=currentConfig;cursor+=frameSize;adtsFrames++;
+      if(cursor===b.length||adtsFrames===3)return result('aac');
+    }
+    // One incidental MPEG sync word inside ciphertext is not evidence of audio.
+    for(let o=offset;o<Math.min(b.length-3,offset+4096);o++){
+      const n1=mp3FrameLength(b,o);if(!n1||o+n1>b.length)continue;
+      const p2=o+n1;if(o===offset&&p2===b.length)return result('mp3',o);
+      const n2=mp3FrameLength(b,p2);if(!n2||p2+n2>b.length)continue;
+      const p3=p2+n2;if(o===offset&&p3===b.length)return result('mp3',o);
+      const n3=mp3FrameLength(b,p3);if(n3&&p3+n3<=b.length)return result('mp3',o);
+    }
+    return result();
   }
+  function sniff(b){return probeAudio(b).format;}
   function validateAudio(b,ext){
+    const probe=probeAudio(b);
+    if(probe.tagBytes&&probe.format===ext)b=b.subarray(probe.tagBytes);
     if(!b.length)fail('音频数据为空');
     const view=new DataView(b.buffer,b.byteOffset,b.byteLength);
     if(ext==='flac'){
@@ -200,6 +229,7 @@
           const field={TIT2:'title',TPE1:'artist',TALB:'album'}[id];if(field&&n<65536)m[field]=id3Text(b.slice(off+10,off+10+n));off+=10+n;
         }
       }else if(ext==='flac'){
+        const probe=probeAudio(b);if(probe.tagBytes)b=b.subarray(probe.tagBytes);
         let off=4,last=false;while(!last&&off+4<=b.length){last=!!(b[off]&128);const type=b[off]&127,n=(b[off+1]<<16)|(b[off+2]<<8)|b[off+3];checkRange(b,off+4,n);
           if(type===4&&n<1024*1024){const block=b.slice(off+4,off+4+n),v=new DataView(block.buffer);let p=0;const read=()=>{checkRange(block,p,4);const x=v.getUint32(p,true);p+=4;return x;};const len=read();checkRange(block,p,len);p+=len;const count=read();if(count>10000)break;for(let i=0;i<count;i++){const k=read();checkRange(block,p,k);const s=text(block.slice(p,p+k));p+=k;const eq=s.indexOf('='),field={TITLE:'title',ARTIST:'artist',ALBUM:'album'}[s.slice(0,eq).toUpperCase()];if(field)m[field]=cleanText(s.slice(eq+1));}}
           off+=4+n;
@@ -208,28 +238,92 @@
     }catch{/* Bad optional tags never prevent export of an otherwise recognized stream. */}
     return m;
   }
-  async function decode(input,name,progress=()=>{}){
-    const b=input instanceof Uint8Array?new Uint8Array(input.buffer,input.byteOffset,input.byteLength):new Uint8Array(input);
-    if(!b.length)fail('文件为空');if(b.length>MAX_FILE)fail('单文件上限为 128 MiB');
-    const ext=String(name).split('.').pop().toLowerCase();let r;
-    progress(5);
-    if(starts(b,'CTENFDAM')||ext==='ncm')r=await ncm(b,progress);
-    else if(QMC_EXT.has(ext))r=await qmc(b,progress);
-    else if(ext==='kwm')r=await kwm(b,progress);
-    else if(ext==='xm'||starts(b,'ifmt'))r=await xm(b,progress);
-    else if(['tm0','tm2','tm3','tm6'].includes(ext)){
-      checkRange(b,0,32,'TM');const bytes=b.slice();bytes.set([0,0,0,32,0x66,0x74,0x79,0x70]);
-      r={bytes,kind:'TM 头部修复',warnings:['仅适用于旧版 TM；未执行重新编码。']};
-    }else if(['mflac','mgg','kgm','kgma','vpr','qmc','qmc4','qmc6','qmc8'].includes(ext)||name.toLowerCase().endsWith('.cache'))fail('本 Demo 未集成该格式或版本的离线解码器：.'+ext+'。不会发起在线查询。');
-    else if(RAW_EXT.has(ext)||sniff(b))r={bytes:b,kind:'原样导出',warnings:['普通音频仅检查并原样导出；不转码、不提升音质。']};
-    else fail('不支持的文件格式：.'+ext);
-    const format=sniff(r.bytes);if(!format)fail('未识别到有效音频头。文件可能损坏，或使用了本 Demo 不支持的加密版本。');
-    validateAudio(r.bytes,format);
-    const parsed=localMetadata(r.bytes,format);r.metadata={...parsed,...Object.fromEntries(Object.entries(r.metadata||{}).filter(([,v])=>v))};
-    r.metadata.title=r.metadata.title||String(name).replace(/\.[^.]+$/,'');r.metadata.artist=r.metadata.artist||'';r.metadata.album=r.metadata.album||'';
-    progress(100);
-    return {...r,format,mime:MIME[format],warnings:r.warnings||[],cover:r.cover||null};
+  function extensionOf(name){
+    const nameText=String(name),dot=nameText.lastIndexOf('.');
+    return dot<0?'':nameText.slice(dot+1).toLowerCase();
   }
-  root.OfflineMusicEngine={decode,MAX_FILE,MIME,sniff,validateAudio,aesEcbDecrypt,keyStream,mask128,cleanText};
+  function signature(b){
+    if(!b||!b.length)return 'EMPTY';
+    if(starts(b,'CTENFDAM'))return 'NCM';
+    if(starts(b,'yeelion-kuwo-tme'))return 'KWM';
+    if(starts(b,'ifmt'))return 'XM';
+    if(starts(b,'ID3'))return 'ID3v2';
+    if(starts(b,'fLaC'))return 'FLAC';
+    if(starts(b,'RIFF')&&starts(b,'WAVE',8))return 'RIFF/WAVE';
+    if(starts(b,'OggS'))return 'Ogg';
+    if(starts(b,'ftyp',4))return 'ISO-BMFF';
+    if(starts(b,'MAC '))return 'APE (not integrated)';
+    if(starts(b,'DSD '))return 'DSF (not integrated)';
+    if(starts(b,[0x30,0x26,0xb2,0x75,0x8e,0x66,0xcf,0x11]))return 'ASF/WMA (not integrated)';
+    if(starts(b,[0x50,0x4b,0x03,0x04]))return 'ZIP (not audio)';
+    if(/^\s*(?:<!doctype html|<html[\s>])/i.test(text(b.subarray(0,80))))return 'HTML (not audio)';
+    if(b.length>=7&&b[0]===255&&(b[1]&0xf6)===0xf0)return 'ADTS candidate';
+    if(mp3FrameLength(b,0))return 'MPEG audio candidate';
+    return 'UNKNOWN';
+  }
+  function diagnosticError(message,code){const e=new Error(message);e.code=code;return e;}
+  async function decode(input,name,progress=()=>{}){
+    const ext=extensionOf(name);
+    const diagnostic={schemaVersion:1,inputExtension:/^[a-z0-9]{1,16}$/.test(ext)?'.'+ext:'(unknown)',
+      inputBytes:0,inputSignature:'UNKNOWN',decoder:'none',stage:'input',outputBytes:null,outputSignature:null};
+    try{
+      const b=input instanceof Uint8Array?new Uint8Array(input.buffer,input.byteOffset,input.byteLength):new Uint8Array(input);
+      diagnostic.inputBytes=b.length;diagnostic.inputSignature=signature(b);
+      if(!b.length)throw diagnosticError('文件为空','EMPTY_FILE');
+      if(b.length>MAX_FILE)throw diagnosticError('单文件上限为 128 MiB','FILE_TOO_LARGE');
+      progress(5);
+      const oldEncrypted=QMC_EXT.has(ext)||['ncm','kwm','xm','tm0','tm2','tm3','tm6'].includes(ext);
+      let plain='';
+      // Avoid decrypting an already-decoded file just because its old suffix remains.
+      // Only accept validated audio exactly after optional tags, not a sync in ciphertext.
+      if(oldEncrypted&&!['NCM','KWM','XM'].includes(diagnostic.inputSignature)){
+        const probe=probeAudio(b);
+        if(probe.format&&probe.frameOffset===probe.tagBytes){try{validateAudio(b,probe.format);plain=probe.format;}catch{/* Not proven plaintext. */}}
+      }
+      let r;
+      diagnostic.stage='decode';
+      if(plain){
+        diagnostic.decoder='plaintext';
+        r={bytes:b,kind:'已是普通音频 · 原样导出',warnings:['文件内容已是 '+plain.toUpperCase()+'，不再按 .'+ext+' 重复解码；导出字节保持不变。']};
+      }else if(starts(b,'CTENFDAM')||ext==='ncm'){
+        diagnostic.decoder='ncm';r=await ncm(b,progress);
+      }else if(QMC_EXT.has(ext)){
+        diagnostic.decoder='qmc-legacy';r=await qmc(b,progress);
+      }else if(ext==='kwm'){
+        diagnostic.decoder='kwm';r=await kwm(b,progress);
+      }else if(ext==='xm'||starts(b,'ifmt')){
+        diagnostic.decoder='xm';r=await xm(b,progress);
+      }else if(['tm0','tm2','tm3','tm6'].includes(ext)){
+        diagnostic.decoder='tm-legacy';
+        checkRange(b,0,32,'TM');const bytes=b.slice();bytes.set([0,0,0,32,0x66,0x74,0x79,0x70]);
+        r={bytes,kind:'TM 头部修复',warnings:['仅适用于旧版 TM；未执行重新编码。']};
+      }else if(['mflac','mgg','kgm','kgma','vpr','qmc','qmc4','qmc6','qmc8'].includes(ext)||String(name).toLowerCase().endsWith('.cache')){
+        throw diagnosticError('本 Demo 未集成该格式或版本的离线解码器：.'+ext+'。不会发起在线查询。','UNSUPPORTED_FORMAT');
+      }else if(RAW_EXT.has(ext)||sniff(b)){
+        diagnostic.decoder='raw';r={bytes:b,kind:'原样导出',warnings:['普通音频仅检查并原样导出；不转码、不提升音质。']};
+      }else throw diagnosticError('不支持的文件格式：'+diagnostic.inputExtension,'UNSUPPORTED_FORMAT');
+      diagnostic.stage='audio-header';diagnostic.outputBytes=r.bytes.length;diagnostic.outputSignature=signature(r.bytes);
+      const probe=probeAudio(r.bytes),format=probe.format;
+      diagnostic.probe=probe;
+      if(!format){
+        const code=probe.issue||'AUDIO_HEADER_UNRECOGNIZED';
+        const reason=probe.issue?'前置 ID3 标签不完整或不受支持。':'未识别到有效音频头；暂不能区分加密版本不支持、内部编码不支持或数据不完整。';
+        throw diagnosticError(reason+' ['+code+' · '+diagnostic.inputExtension+' · '+diagnostic.decoder+'] 原文件未改动，可点「查看诊断」。',code);
+      }
+      diagnostic.stage='audio-validation';validateAudio(r.bytes,format);
+      const parsed=localMetadata(r.bytes,format);r.metadata={...parsed,...Object.fromEntries(Object.entries(r.metadata||{}).filter(([,v])=>v))};
+      r.metadata.title=r.metadata.title||String(name).replace(/\.[^.]+$/,'');r.metadata.artist=r.metadata.artist||'';r.metadata.album=r.metadata.album||'';
+      if(probe.tagBytes&&format!=='mp3')r.warnings=[...(r.warnings||[]),'识别到前置 ID3 标签，已保留全部字节；不同播放器的兼容性可能不同。'];
+      diagnostic.stage='complete';diagnostic.code='OK';
+      progress(100);
+      return {...r,format,mime:MIME[format],warnings:r.warnings||[],cover:r.cover||null,diagnostics:diagnostic};
+    }catch(error){
+      const e=error instanceof Error?error:new Error(String(error));
+      if(e.message==='CANCELLED')throw e;
+      e.code=e.code||(diagnostic.stage==='decode'?'DECODE_FAILED':diagnostic.stage==='audio-validation'?'AUDIO_VALIDATION_FAILED':'INPUT_FAILED');
+      e.diagnostics={...diagnostic,code:e.code};throw e;
+    }
+  }
+  root.OfflineMusicEngine={decode,MAX_FILE,MIME,sniff,probeAudio,validateAudio,aesEcbDecrypt,keyStream,mask128,cleanText};
   if(typeof module==='object'&&module.exports)module.exports=root.OfflineMusicEngine;
 })(typeof globalThis!=='undefined'?globalThis:this);
