@@ -8,6 +8,9 @@ on:
       - "public/**/*"
       - "package-lock.json"
       - "package.json"
+      # Independent offline/Android sources have their own build workflow.
+      - "!offline/**"
+      - "!android/**"
   pull_request:
     branches: [ master ]
     types: [ opened, synchronize, reopened ]
@@ -18,8 +21,8 @@ on:
       - "public/**/*"
       - "package-lock.json"
       - "package.json"
-
-
+      - "!offline/**"
+      - "!android/**"
 
 jobs:
   build:

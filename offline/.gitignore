@@ -1,0 +1,10 @@
+index.html
+src/demo-data.json
+samples/*
+!samples/README.md
+tests/*results.json
+tests/*.png
+tests/*.zip
+tests/*.mp3
+tests/*download.json
+__pycache__/

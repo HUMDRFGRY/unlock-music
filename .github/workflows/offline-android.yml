@@ -1,0 +1,119 @@
+name: Offline Web + Android APK + Releases
+on:
+  push:
+    branches: [main, 'feat/offline-mobile-android']
+    paths: ['offline/**', 'android/**', '.github/scripts/**', '.github/workflows/offline-android.yml']
+  pull_request:
+    branches: [main]
+    paths: ['offline/**', 'android/**', '.github/scripts/**', '.github/workflows/offline-android.yml']
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: 'Publish verified assets to Releases (main branch only)'
+        type: boolean
+        default: false
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: offline-android-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  test-and-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - id: version
+        name: Validate version and release packaging tests
+        run: |
+          echo "value=$(python .github/scripts/package-offline.py --version-only)" >> "$GITHUB_OUTPUT"
+          python .github/scripts/test-release-tools.py
+      - name: Generate original fixtures, test decoder and build offline HTML
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python offline/tests/make_audio.py
+          node offline/tests/engine.test.cjs
+          python offline/build.py
+      - name: Browser and mobile bridge tests
+        run: |
+          python -m pip install playwright==1.55.0
+          python -m playwright install --with-deps chromium
+          python offline/tests/browser_smoke.py
+          python offline/tests/mobile_smoke.py
+      - name: Native export staging tests
+        run: |
+          mkdir -p /tmp/unlock-java-tests
+          javac --release 17 -encoding UTF-8 -d /tmp/unlock-java-tests android/app/src/main/java/io/github/humdrfgry/unlockmusic/ExportStore.java android/tests/ExportStoreTest.java
+          java -ea -cp /tmp/unlock-java-tests ExportStoreTest | tee android/tests/native-ci.log
+      - name: Build, lint and verify Android debug APK
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+          gradle -p android --no-daemon assembleDebug lintDebug
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose android/app/build/outputs/apk/debug/app-debug.apk | tee android/tests/apk-signature-ci.log
+          python .github/scripts/package-offline.py
+      - name: Built binaries and web bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Test evidence and lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-test-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            offline/tests/*results.json
+            offline/tests/mobile-*.png
+            android/tests/*ci.log
+            android/app/build/reports/lint-results-debug.html
+          if-no-files-found: warn
+          retention-days: 14
+  publish-release:
+    needs: test-and-build
+    # PRs, forks and feature-branch pushes never obtain a release-writing job.
+    if: >-
+      github.repository == 'HUMDRFGRY/unlock-music' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.publish_release))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: offline-releases
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: offline-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts
+      - name: Publish verified assets to GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.test-and-build.outputs.version }}
+        run: bash .github/scripts/publish-offline.sh artifacts

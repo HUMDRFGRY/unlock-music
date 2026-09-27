@@ -1,0 +1,30 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'io.github.humdrfgry.unlockmusic'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'io.github.humdrfgry.unlockmusic.offline'
+        minSdk 26
+        targetSdk 35
+        versionCode 2
+        versionName '0.2.0'
+    }
+    buildTypes {
+        release { minifyEnabled false }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    sourceSets.main.assets.srcDir(layout.buildDirectory.dir('generated/offlineAssets'))
+}
+// Do not maintain a second copy of the web app inside Android sources.
+def webPage = rootProject.file('../offline/index.html')
+tasks.register('syncOfflineAssets', Copy) {
+    from(webPage)
+    into(layout.buildDirectory.dir('generated/offlineAssets'))
+    doFirst {
+        if (!webPage.exists()) throw new GradleException('Build offline/index.html first; see offline/README.md')
+    }
+}
+tasks.named('preBuild').configure { dependsOn 'syncOfflineAssets' }
